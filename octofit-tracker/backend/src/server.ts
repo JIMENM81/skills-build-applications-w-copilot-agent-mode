@@ -1,35 +1,19 @@
 import express, { Express, Request, Response, NextFunction } from 'express';
-import axios from 'axios';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import connectDB from './config/database.js';
+import {
+  fetchWeatherFromAPI,
+  saveWeatherToDatabase,
+  getWeatherHistory,
+  fetchForecastFromAPI,
+} from './services/weatherService.js';
 
 dotenv.config();
 
-interface WeatherData {
-  city: string;
-  country: string;
-  temperature: number;
-  feelsLike: number;
-  humidity: number;
-  pressure: number;
-  description: string;
-  windSpeed: number;
-  uvIndex: number;
-  timestamp: string;
-}
-
-interface ForecastItem {
-  timestamp: number;
-  temperature: number;
-  description: string;
-  humidity: number;
-  windSpeed: number;
-}
-
-interface ForecastData {
-  city: string;
-  country: string;
-  forecast: ForecastItem[];
+interface WeatherQuery {
+  city?: string;
+  limit?: string;
 }
 
 interface ErrorResponse {
@@ -37,21 +21,25 @@ interface ErrorResponse {
 }
 
 const app: Express = express();
-const PORT = process.env.PORT || 5000;
-
-// API Configuration
-const WEATHER_API_KEY = process.env.OPENWEATHER_API_KEY || 'demo_key';
-const WEATHER_API_URL = 'https://api.openweathermap.org/data/2.5/weather';
-const FORECAST_API_URL = 'https://api.openweathermap.org/data/2.5/forecast';
+const PORT = process.env.PORT || 8000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+  credentials: true,
+}));
 app.use(express.json());
 
+// Connect to MongoDB
+connectDB().catch((error: Error) => {
+  console.error('Failed to connect to database:', error.message);
+  process.exit(1);
+});
+
 /**
- * Fetch current weather data for a city
+ * Fetch current weather data for a city and save to DB
  */
-app.get('/api/weather', async (req: Request, res: Response): Promise<void> => {
+app.get('/api/weather', async (req: Request<{}, {}, {}, WeatherQuery>, res: Response): Promise<void> => {
   try {
     const { city } = req.query;
 
@@ -60,90 +48,85 @@ app.get('/api/weather', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const response = await axios.get(WEATHER_API_URL, {
-      params: {
-        q: city,
-        appid: WEATHER_API_KEY,
-        units: 'metric',
-      },
-    });
+    // Fetch from API
+    const weatherData = await fetchWeatherFromAPI(city);
 
-    const weatherData: WeatherData = {
-      city: response.data.name,
-      country: response.data.sys.country,
-      temperature: Math.round(response.data.main.temp),
-      feelsLike: Math.round(response.data.main.feels_like),
-      humidity: response.data.main.humidity,
-      pressure: response.data.main.pressure,
-      description: response.data.weather[0].main,
-      windSpeed: response.data.wind.speed,
-      uvIndex: response.data.clouds.all,
-      timestamp: new Date().toISOString(),
-    };
+    // Save to database
+    await saveWeatherToDatabase(weatherData);
 
     res.json(weatherData);
   } catch (error) {
-    if (axios.isAxiosError(error)) {
-      console.error('Weather API Error:', error.message);
-
-      if (error.response?.status === 404) {
-        res.status(404).json({ error: 'City not found' });
-        return;
-      }
+    if (error instanceof Error && 'response' in error && (error as any).response?.status === 404) {
+      res.status(404).json({ error: 'City not found' });
+      return;
     }
 
+    console.error('Weather fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch weather data' });
   }
 });
 
 /**
+ * Get weather history for a city
+ */
+app.get(
+  '/api/weather/history/:city',
+  async (req: Request<{ city: string }, {}, {}, WeatherQuery>, res: Response): Promise<void> => {
+    try {
+      const { city } = req.params;
+      const limit = Math.min(parseInt(req.query.limit || '10'), 100);
+
+      if (!city || typeof city !== 'string') {
+        res.status(400).json({ error: 'City parameter is required' });
+        return;
+      }
+
+      const history = await getWeatherHistory(city, limit);
+
+      if (history.length === 0) {
+        res.status(404).json({ error: 'No weather history found for this city' });
+        return;
+      }
+
+      res.json({
+        city,
+        count: history.length,
+        records: history,
+      });
+    } catch (error) {
+      console.error('Weather history error:', error);
+      res.status(500).json({ error: 'Failed to fetch weather history' });
+    }
+  }
+);
+
+/**
  * Fetch weather forecast for a city
  */
-app.get('/api/forecast', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { city } = req.query;
+app.get(
+  '/api/forecast',
+  async (req: Request<{}, {}, {}, WeatherQuery>, res: Response): Promise<void> => {
+    try {
+      const { city } = req.query;
 
-    if (!city || typeof city !== 'string') {
-      res.status(400).json({ error: 'City parameter is required' });
-      return;
-    }
+      if (!city || typeof city !== 'string') {
+        res.status(400).json({ error: 'City parameter is required' });
+        return;
+      }
 
-    const response = await axios.get(FORECAST_API_URL, {
-      params: {
-        q: city,
-        appid: WEATHER_API_KEY,
-        units: 'metric',
-      },
-    });
-
-    const forecast: ForecastItem[] = response.data.list.slice(0, 8).map((item: any) => ({
-      timestamp: item.dt,
-      temperature: Math.round(item.main.temp),
-      description: item.weather[0].main,
-      humidity: item.main.humidity,
-      windSpeed: item.wind.speed,
-    }));
-
-    const forecastData: ForecastData = {
-      city: response.data.city.name,
-      country: response.data.city.country,
-      forecast,
-    };
-
-    res.json(forecastData);
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      console.error('Forecast API Error:', error.message);
-
-      if (error.response?.status === 404) {
+      const forecastData = await fetchForecastFromAPI(city);
+      res.json(forecastData);
+    } catch (error) {
+      if (error instanceof Error && 'response' in error && (error as any).response?.status === 404) {
         res.status(404).json({ error: 'City not found' });
         return;
       }
-    }
 
-    res.status(500).json({ error: 'Failed to fetch forecast data' });
+      console.error('Forecast fetch error:', error);
+      res.status(500).json({ error: 'Failed to fetch forecast data' });
+    }
   }
-});
+);
 
 /**
  * Health check endpoint
@@ -170,9 +153,8 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction): void => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 OctoFit Weather API Server running on http://localhost:${PORT}`);
-  console.log(
-    `📡 Weather API Key configured: ${WEATHER_API_KEY !== 'demo_key' ? 'Yes' : 'No (using demo key)'}`
-  );
+  console.log(`📊 MongoDB: ${process.env.MONGODB_URI || 'mongodb://localhost:27017/octofit-weather'}`);
+  console.log(`🔗 CORS enabled for: ${process.env.CORS_ORIGIN || 'http://localhost:5173'}`);
 });
 
 export default app;
