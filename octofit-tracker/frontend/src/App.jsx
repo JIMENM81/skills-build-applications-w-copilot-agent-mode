@@ -16,7 +16,7 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.get(`http://localhost:5000/api/weather?city=${cityName}`);
+      const response = await axios.get(`/api/weather?city=${cityName}`);
       setWeatherData(response.data);
     } catch (err) {
       setError('Failed to fetch weather data. Please try again.');
